@@ -21,6 +21,33 @@ transfers on control, bulk, and interrupt endpoints.
   that is started when opening the first device.
 * Thinner layer over OS APIs, with less internal state.
 
+### macOS device capture in this fork
+
+`Device::capture()` explicitly detaches kernel drivers for the whole device
+using `USBDeviceReEnumerate(kUSBReEnumerateCaptureDeviceMask)`, then reopens
+the device and restores its configuration. This requires root privileges;
+the fork does not request entitlement-based authorization.
+
+Capture consumes an unshared device handle. Call it before cloning the handle,
+claiming interfaces, or submitting control transfers. Release capture explicitly
+with `Device::release_capture()`, or drop all device handles, interfaces, and
+endpoints. Release re-enumerates the device so kernel drivers can attach again.
+Any release failure during drop is logged. Normal interface claiming and
+`detach_and_claim_interface()` retain their existing behavior.
+
+The capture-only example sends no adapter protocol commands:
+
+```sh
+cargo build --example capture
+sudo ./target/debug/examples/capture 0403 cc4d 1
+```
+
+The example captures an OpenPort, claims interface 1, and releases it.
+Hardware verification is still needed. API behavior follows Apple's
+[capture option](https://developer.apple.com/documentation/kernel/usbreenumerateoptions/kusbreenumeratecapturedevicemask)
+and the capture/reopen lifecycle in
+[libusb's Darwin backend](https://github.com/libusb/libusb/blob/master/libusb/os/darwin_usb.c).
+
 ### License
 
 MIT or Apache 2.0, at your option

@@ -28,6 +28,8 @@ use io_kit_sys::{
 //
 // Constants.
 //
+pub(crate) const kUSBReEnumerateCaptureDeviceMask: u32 = 1 << 30;
+
 const SYS_IOKIT: c_int = ((0x38) & 0x3f) << 26;
 const SUB_IOKIT_USB: c_int = ((1) & 0xfff) << 14;
 

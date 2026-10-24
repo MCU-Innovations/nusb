@@ -27,8 +27,8 @@ use super::{
     },
     iokit_c::{
         kIOCFPlugInInterfaceID, kIOUSBFindInterfaceDontCare, kIOUsbDeviceUserClientTypeID,
-        IOCFPlugInInterface, IOCreatePlugInInterfaceForService, IOUSBConfigurationDescriptor,
-        IOUSBFindInterfaceRequest,
+        kUSBReEnumerateCaptureDeviceMask, IOCFPlugInInterface, IOCreatePlugInInterfaceForService,
+        IOUSBConfigurationDescriptor, IOUSBFindInterfaceRequest,
     },
 };
 
@@ -119,6 +119,27 @@ impl IoKitDevice {
 
     pub(crate) fn open(&self) -> Result<(), IOReturn> {
         unsafe { check_iokit_return(call_iokit_function!(self.raw, USBDeviceOpen())) }
+    }
+
+    pub(crate) fn open_seize(&self) -> Result<(), IOReturn> {
+        unsafe { check_iokit_return(call_iokit_function!(self.raw, USBDeviceOpenSeize())) }
+    }
+
+    pub(crate) fn close(&self) -> Result<(), IOReturn> {
+        unsafe { check_iokit_return(call_iokit_function!(self.raw, USBDeviceClose())) }
+    }
+
+    pub(crate) fn capture(&self) -> Result<(), IOReturn> {
+        unsafe {
+            check_iokit_return(call_iokit_function!(
+                self.raw,
+                USBDeviceReEnumerate(kUSBReEnumerateCaptureDeviceMask)
+            ))
+        }
+    }
+
+    pub(crate) fn reset_captured(&self) -> Result<(), IOReturn> {
+        unsafe { check_iokit_return(call_iokit_function!(self.raw, ResetDevice())) }
     }
 
     pub(crate) fn set_configuration(&self, configuration: u8) -> Result<(), IOReturn> {

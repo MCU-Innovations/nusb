@@ -95,11 +95,49 @@ impl Device {
             .map_ok(Interface::wrap)
     }
 
+    /// Capture the entire device and detach its kernel drivers on macOS.
+    ///
+    /// This consumes the handle and returns a reopened handle. Call this before
+    /// cloning the device or claiming interfaces. Other handles, interfaces, and
+    /// pending control transfers cause [`ErrorKind::Busy`]. An error consumes
+    /// this handle too.
+    ///
+    /// Capture requires root privileges. This API does not request entitlements
+    /// or display an authorization dialog. Capture affects every interface,
+    /// including serial ports provided by macOS. It is released when the last
+    /// device handle, interface, and endpoint are dropped, or explicitly with
+    /// [`Device::release_capture`]. Capture failure after detaching drivers also
+    /// attempts to release them.
+    ///
+    /// *Supported on macOS only.*
+    #[cfg(target_os = "macos")]
+    pub fn capture(self) -> impl MaybeFuture<Output = Result<Device, Error>> {
+        self.backend.capture().map_ok(Device::wrap)
+    }
+
+    /// Release macOS device capture and allow kernel drivers to attach again.
+    ///
+    /// This consumes the handle because release re-enumerates the device. Open
+    /// it again from a fresh device listing before further use. Other handles,
+    /// interfaces, and pending control transfers cause [`ErrorKind::Busy`].
+    /// Releasing an uncaptured device simply closes this handle.
+    ///
+    /// Dropping the last device handle also attempts to release capture; this
+    /// method allows the caller to observe release errors.
+    ///
+    /// *Supported on macOS only.*
+    #[cfg(target_os = "macos")]
+    pub fn release_capture(self) -> impl MaybeFuture<Output = Result<(), Error>> {
+        self.backend.release_capture()
+    }
+
     /// Detach kernel drivers and open an interface of the device and claim it for exclusive use.
     ///
     /// ### Platform-specific details
     /// This function can only detach kernel drivers on Linux. Calling on other platforms has
     /// the same effect as [`claim_interface`][`Device::claim_interface`].
+    /// On macOS, use `Device::capture` before claiming interfaces to explicitly
+    /// detach drivers for the whole device.
     pub fn detach_and_claim_interface(
         &self,
         interface: u8,

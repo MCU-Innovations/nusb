@@ -35,7 +35,7 @@ use super::{
 };
 
 pub(crate) struct MacDevice {
-    _event_registration: EventRegistration,
+    event_registration: Option<EventRegistration>,
     pub(super) device: IoKitDevice,
     device_descriptor: DeviceDescriptor,
     config_descriptors: Vec<Vec<u8>>,
@@ -43,6 +43,24 @@ pub(crate) struct MacDevice {
     active_config: AtomicU8,
     is_open_exclusive: Mutex<bool>,
     claimed_interfaces: AtomicUsize,
+    captured: bool,
+}
+
+extern "C" {
+    fn geteuid() -> u32;
+}
+
+fn capture_error(operation: &'static str, code: IOReturn) -> Error {
+    let kind = match code {
+        io_kit_sys::ret::kIOReturnNotPrivileged | io_kit_sys::ret::kIOReturnNotPermitted => {
+            ErrorKind::PermissionDenied
+        }
+        io_kit_sys::ret::kIOReturnExclusiveAccess => ErrorKind::Busy,
+        io_kit_sys::ret::kIOReturnNoDevice => ErrorKind::Disconnected,
+        io_kit_sys::ret::kIOReturnUnsupported => ErrorKind::Unsupported,
+        _ => ErrorKind::Other,
+    };
+    Error::new_os(kind, operation, code)
 }
 
 // `get_configuration` does IO, so avoid it in the common case that:
@@ -120,7 +138,7 @@ impl MacDevice {
                 };
 
             Ok(Arc::new(MacDevice {
-                _event_registration,
+                event_registration: Some(_event_registration),
                 device,
                 device_descriptor,
                 config_descriptors,
@@ -128,6 +146,7 @@ impl MacDevice {
                 active_config: AtomicU8::new(active_config),
                 is_open_exclusive: Mutex::new(opened),
                 claimed_interfaces: AtomicUsize::new(0),
+                captured: false,
             }))
         })
     }
@@ -204,13 +223,105 @@ impl MacDevice {
     pub(crate) fn reset(self: Arc<Self>) -> impl MaybeFuture<Output = Result<(), Error>> {
         Blocking::new(move || {
             self.require_open_exclusive()?;
-            self.device.reset().map_err(|e| match e {
+            let result = if self.captured {
+                self.device.reset_captured()
+            } else {
+                self.device.reset()
+            };
+            result.map_err(|e| match e {
                 io_kit_sys::ret::kIOReturnNoDevice => {
                     Error::new_os(ErrorKind::Disconnected, "device disconnected", e)
                 }
                 _ => Error::new_os(ErrorKind::Other, "failed to reset device", e),
             })
         })
+    }
+
+    pub(crate) fn capture(self: Arc<Self>) -> impl MaybeFuture<Output = Result<Arc<Self>, Error>> {
+        Blocking::new(move || {
+            let mut device = Arc::try_unwrap(self).map_err(|_| {
+                Error::new(
+                    ErrorKind::Busy,
+                    "capture requires an unshared device handle",
+                )
+            })?;
+            if device.captured {
+                return Ok(Arc::new(device));
+            }
+            if unsafe { geteuid() } != 0 {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "macOS USB device capture requires root privileges",
+                ));
+            }
+
+            let configuration = device.active_config.load(Ordering::SeqCst);
+            device
+                .device
+                .capture()
+                .map_err(|e| capture_error("failed to capture macOS USB device", e))?;
+            device.captured = true;
+            log::debug!("Captured macOS USB device; reopening before claiming interfaces");
+
+            device.event_registration.take();
+            device.close();
+            device
+                .device
+                .open_seize()
+                .map_err(|e| capture_error("failed to reopen captured macOS USB device", e))?;
+            *device.is_open_exclusive.get_mut().unwrap() = true;
+            let event_source = device
+                .device
+                .create_async_event_source()
+                .map_err(|e| capture_error("failed to create captured device event source", e))?;
+            device.event_registration = Some(add_event_source(event_source));
+
+            let active = device
+                .device
+                .get_configuration()
+                .map_err(|e| capture_error("failed to read configuration after USB capture", e))?;
+            if active != configuration {
+                device
+                    .device
+                    .set_configuration(configuration)
+                    .map_err(|e| {
+                        capture_error("failed to restore configuration after USB capture", e)
+                    })?;
+            }
+            Ok(Arc::new(device))
+        })
+    }
+
+    pub(crate) fn release_capture(self: Arc<Self>) -> impl MaybeFuture<Output = Result<(), Error>> {
+        Blocking::new(move || {
+            let mut device = Arc::try_unwrap(self).map_err(|_| {
+                Error::new(
+                    ErrorKind::Busy,
+                    "capture release requires an unshared device handle",
+                )
+            })?;
+            device.release_capture_inner()
+        })
+    }
+
+    fn release_capture_inner(&mut self) -> Result<(), Error> {
+        if self.captured {
+            self.event_registration.take();
+            self.device
+                .reset()
+                .map_err(|e| capture_error("failed to release macOS USB device capture", e))?;
+            self.captured = false;
+            log::debug!("Released macOS USB device capture");
+        }
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        if std::mem::take(self.is_open_exclusive.get_mut().unwrap()) {
+            if let Err(err) = self.device.close() {
+                log::debug!("Failed to close device: {err:x}");
+            }
+        }
     }
 
     pub(crate) fn claim_interface(
@@ -364,12 +475,10 @@ impl MacDevice {
 
 impl Drop for MacDevice {
     fn drop(&mut self) {
-        if *self.is_open_exclusive.get_mut().unwrap() {
-            match unsafe { call_iokit_function!(self.device.raw, USBDeviceClose()) } {
-                io_kit_sys::ret::kIOReturnSuccess => {}
-                err => log::debug!("Failed to close device: {err:x}"),
-            };
+        if let Err(err) = self.release_capture_inner() {
+            log::warn!("{err}");
         }
+        self.close();
     }
 }
 
